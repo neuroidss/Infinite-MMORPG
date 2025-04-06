@@ -2,6 +2,8 @@
 
 http://neuroidss.com:8000/
 
+![llm inifinitely creates mmorpg](https://github.com/neuroidss/Infinite-MMORPG/blob/main/Screencast_from_2025-04-05_20-14-02.gif?raw=true)
+
 ```
 make strategic plan and then build mmorpg game with pvp, infinite levelup, infinite pve mob grind for artifacts, every minute free wishes for artifacts gacha where onserver ollama qwen2.5-coder:7b-instruct-q8_0 chatbot with tools generates new artifacts and mobs, threejs, nipplejs. make keyboard wasd for 3d move & mouse movement for 3d look, real gamepad and multitouch onscreen gamepad joysticks controls left for 3d move and right for 3d move, should be desktop and mobile ready. make sure not using browser alert() popups. frontend in single html&css&js block, backend in another single block, required setup and run in another single sh block. fully implement all features.
 here elemental resonance pyro with hydro vaporize, with electro over-load, with cryo melt, with dendro burning, with anemo swirl, with geo crystalyze, hydro with electro electro-charged, with cryo frozen, with dendro bloom with pyro burgeon with electro hyper-bloom, with anemo swirl, with geo crystalyze, electro with cryo super-conduct, with dendro quicken spread aggravate, cryo with wind swirl, with geo crystalyze.
