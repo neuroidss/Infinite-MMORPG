@@ -356,6 +356,7 @@
             }
 
              // Update common properties - Interpolate position smoothly
+             if(entityData.gatePosition) entityData.position=entityData.gatePosition;
              const targetPosition = new THREE.Vector3(entityData.position.x, entities[id].mesh.position.y, entityData.position.z); // Keep current Y unless it's an artifact/gate
              if (entityType === 'artifact' || entityType === 'dungeon') {
                  targetPosition.y = entityData.position.y; // Use server Y for artifacts/gates
@@ -580,12 +581,12 @@
 
             // Mouse Look (Pointer Lock)
             document.addEventListener('click', () => {
-                if (!isPointerLocked && !isTouchDevice) { // Don't lock on touch devices
-                    document.body.requestPointerLock();
-                } else {
+//                if (!isPointerLocked && !isTouchDevice) { // Don't lock on touch devices
+//                    document.body.requestPointerLock();
+//                } else {
                      // Handle click as attack if pointer not locked (e.g., mobile fallback)
                      attack();
-                }
+//                }
             });
             document.addEventListener('pointerlockchange', () => {
                 isPointerLocked = document.pointerLockElement === document.body;
@@ -1236,6 +1237,7 @@
                        // Don't directly set playerMesh position from general game_state here
                        // Just update the data cache in entities[playerId]
                        if(entities[playerId]) entities[playerId].data = p;
+                       createOrUpdateEntityLabel(p.id, entities[playerId].data, entities[playerId].type); // Create label
                   } else {
                        // Update other players
                        createOrUpdateEntityMesh({ ...p, name: `Lvl ${p.level} Player ${p.id.substring(0, 6)}`, isPlayer: true });

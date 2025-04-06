@@ -13,6 +13,9 @@ import fetch from 'node-fetch'; // For Ollama API calls
 const HOSTNAME = process.env.HOSTNAME || '0.0.0.0';
 const PORT = process.env.PORT || 3000;
 const DEBUG = process.env.DEBUG === 'true' || true; // Enable debug mode by default for easy testing
+const DESIRED_BOTS = 1;
+const HEALTH_AND_ATTACK_MULTIPLIER = 1;
+const BOT_SPEED_MULTIPLIER = 4;
 const TICK_RATE = 30; // Game loop updates per second
 const OLLAMA_API_URL = process.env.OLLAMA_API_URL || 'http://10.8.0.14:11434/v1/chat/completions'; // OpenAI compatible endpoint
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5-coder:7b-instruct-q8_0'; // Make sure this model is running in Ollama
@@ -40,6 +43,7 @@ const clampToArena = (position) => {
 };
 
 // --- Game State ---
+let deltaTime;
 let players = {};
 let mobs = {};
 let artifacts = {}; // Instantiated artifacts in the world (on ground)
@@ -58,7 +62,7 @@ let knownElements = { // Initial elements
 };
 let elementReactions = { // TargetElement: { AttackingElement: ReactionFunction }
     // Simplified reactions for now - apply extra damage or status
-    _default: (target, attacker, attackingElement) => { log(`Reaction: ${attackingElement.name} hit ${target.element?.name || 'none'}`); return 0; }, // Generic handler
+    _default: (target, attacker, attackingElement) => { log(`Reaction: ${attackingElement.name} hit ${target.element?.name || 'none'}`); return 1; }, // Generic handler // 0
     _applyStatus: (target, status, duration = 5000) => {
         target.statusEffects = target.statusEffects || {};
         const existing = target.statusEffects[status.name];
@@ -242,7 +246,7 @@ const tools = [
                     movement_speed: { type: "number", description: "Movement speed units per second (e.g., 2)." },
                     xp_reward: { type: "number", description: "Experience points awarded on defeat." },
                     loot_table: { type: "array", items: { type: "string" }, description: "List of artifact template names this mob can drop." },
-                    visual_description: { type: "string", description: "Describe its visual appearance (e.g., 'large, rocky golem with magma veins', 'small, floating blue sprite')." },
+                    visual_description: { type: "string", description: "Describe its visual appearance (e.g., 'large rocky golem with magma veins', 'small floating blue sprite')." },
                     behavior: { type: "string", enum: ["aggressive", "defensive", "ranged"], description: "Basic combat behavior pattern." } // Simple behavior types
                 },
                 required: ["name", "element", "description", "base_health", "base_damage", "attack_speed", "movement_speed", "xp_reward", "loot_table", "visual_description", "behavior"]
@@ -304,6 +308,9 @@ const tools = [
     }
 ];
 
+// Helper function for consistent ID generation from names
+const generateIdFromName = (name) => name.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim().replace(/\s+/g, '_');
+
 // --- Tool Call Handlers ---
 const toolHandlers = {
     create_artifact: (args) => {
@@ -333,7 +340,9 @@ const toolHandlers = {
     },
     create_mob: (args) => {
         log("Handling tool call: create_mob", args);
-        const id = args.name.toLowerCase().replace(/\s+/g, '_');
+        // Use the sanitized ID generation
+        const id = generateIdFromName(args.name);//const id = args.name.toLowerCase().replace(/\s+/g, '_');
+
         if (knownMobTemplates[id]) {
             log(`Mob template ${id} already exists.`);
             return `Mob template ${id} already exists.`;
@@ -343,12 +352,13 @@ const toolHandlers = {
             args.element = 'physical';
         }
         // Validate loot table references existing artifact templates
-        const validLoot = (args.loot_table || []).filter(aName => knownArtifactTemplates[aName.toLowerCase().replace(/\s+/g, '_')]);
+        // Use sanitized IDs for lookup here too
+        const validLoot = (args.loot_table || []).filter(aName => knownArtifactTemplates[generateIdFromName(aName)]);
         if (validLoot.length < (args.loot_table?.length || 0)) {
             log(`Warning: Some loot table items for mob ${args.name} do not exist yet.`);
         }
 
-        knownMobTemplates[id] = {
+        knownMobTemplates[id] = { // Store using sanitized ID
             id: id,
             name: args.name,
             element: args.element.toLowerCase(),
@@ -358,7 +368,7 @@ const toolHandlers = {
             attackSpeed: args.attack_speed || 1, // attacks per second
             moveSpeed: args.movement_speed || 2, // units per second
             xpReward: args.xp_reward || 10,
-            lootTable: validLoot.map(aName => aName.toLowerCase().replace(/\s+/g, '_')), // Store IDs
+            lootTable: validLoot.map(aName => generateIdFromName(aName)), // Store sanitized IDs
             visual: args.visual_description || 'A fearsome creature.',
             color: knownElements[args.element.toLowerCase()]?.color || knownElements.physical.color,
             behavior: args.behavior || 'aggressive',
@@ -373,8 +383,9 @@ const toolHandlers = {
         const dungeonId = uuidv4();
 
         // Validate mob/boss types exist
-        const validMobTypes = args.mob_types.filter(mName => knownMobTemplates[mName.toLowerCase().replace(/\s+/g, '_')]);
-        const bossTemplateId = args.boss_type.toLowerCase().replace(/\s+/g, '_');
+        // Use sanitized IDs for lookup
+        const validMobTypes = args.mob_types.filter(mName => knownMobTemplates[generateIdFromName(mName)]);
+        const bossTemplateId = generateIdFromName(args.boss_type);
         const bossTemplate = knownMobTemplates[bossTemplateId];
 
         if (validMobTypes.length === 0 || !bossTemplate) {
@@ -396,7 +407,7 @@ const toolHandlers = {
             gatePosition: gatePosition,
             gateVisual: args.visual_description || 'A swirling portal.',
             mobs: {}, // Mobs currently inside the dungeon instance
-            mobTemplates: validMobTypes.map(mName => mName.toLowerCase().replace(/\s+/g, '_')),
+            mobTemplates: validMobTypes.map(mName => generateIdFromName(mName)), // Store sanitized IDs
             targetMobCount: args.mob_count || 10,
             bossTemplateId: bossTemplateId,
             bossId: null, // ID of the spawned boss instance
@@ -576,10 +587,10 @@ const getPlayerStats = (playerId) => {
     if (!player) return { maxHealth: 100, damage: 10, attackSpeed: 1, moveSpeed: 5, element: knownElements.physical };
 
     let stats = {
-        maxHealth: 100 + (player.level * 10),
-        damage: 10 + (player.level * 2),
+        maxHealth: (100 + (player.level * 10)) * HEALTH_AND_ATTACK_MULTIPLIER,
+        damage: (10 + (player.level * 2)) * HEALTH_AND_ATTACK_MULTIPLIER,
         attackSpeed: 1, // attacks per second
-        moveSpeed: 5, // units per second
+        moveSpeed: 5 * BOT_SPEED_MULTIPLIER, // units per second
         element: knownElements.physical, // Default element
     };
 
@@ -717,7 +728,7 @@ const handleDeath = (target, killer) => {
 
 
         // Remove mob from game state and dungeon (if applicable)
-        const dungeonId = target.dungeonId;
+        const dungeonId = target?.dungeonId;
         delete mobs[target.id];
          if (dungeonId && dungeons[dungeonId] && dungeons[dungeonId].mobs[target.id]) {
               delete dungeons[dungeonId].mobs[target.id];
@@ -769,9 +780,9 @@ const spawnMob = (templateId, position = null, dungeonId = null, isBoss = false,
         color: template.color,
         element: knownElements[template.element] || knownElements.physical,
         position: spawnPos,
-        health: Math.round(template.baseHealth * healthMultiplier),
-        maxHealth: Math.round(template.baseHealth * healthMultiplier),
-        damage: Math.round(template.baseDamage * damageMultiplier),
+        health: Math.round(template.baseHealth * healthMultiplier * HEALTH_AND_ATTACK_MULTIPLIER),
+        maxHealth: Math.round(template.baseHealth * healthMultiplier * HEALTH_AND_ATTACK_MULTIPLIER),
+        damage: Math.round(template.baseDamage * damageMultiplier * HEALTH_AND_ATTACK_MULTIPLIER),
         attackSpeed: template.attackSpeed, // attacks per second
         moveSpeed: template.moveSpeed, // units per second
         xpReward: template.xpReward,
@@ -965,7 +976,7 @@ const performGachaWish = (playerId) => {
 // --- Game Loop ---
 const gameLoop = () => {
     const now = Date.now();
-    const deltaTime = (now - (lastTickTime || now)) / 1000; // Time since last tick in seconds
+    deltaTime = (now - (lastTickTime || now)) / 1000; // Time since last tick in seconds //const
     lastTickTime = now;
 
     // --- Update Logic ---
@@ -1148,7 +1159,7 @@ const gameLoop = () => {
          if (dungeon.closingTime && now > dungeon.closingTime) {
              log(`Closing dungeon ${dungeon.name} (${id}).`);
              // Remove remaining mobs associated with the dungeon
-             Object.keys(mobs).forEach(mobId => {
+             Object.keys(mobs).filter(mobId => mobs[mobId]).forEach(mobId => {
                  if (mobs[mobId].dungeonId === id) {
                      delete mobs[mobId];
                      io.emit('mob_removed', mobId);
@@ -1498,6 +1509,7 @@ io.on('connection', (socket) => {
 const initializeDebugContent = () => {
     if (!DEBUG) return;
     log("Initializing Debug Mode Content...");
+    let createdSomething = false; // Flag to track if we added anything new
 
     // 1. Pre-create Elements (if not existing) - chatbot should do this normally
     //    (Example - assuming chatbot hasn't run yet)
@@ -1506,10 +1518,11 @@ const initializeDebugContent = () => {
             name: "Plasma", color_hex: "0xFF00FF", description: "Superheated ionized gas.",
             reactions: { hydro: "Vaporizes violently (High Dmg)", cryo: "Thermal Shock (Stun chance)"}
         });
+        createdSomething = true;
      }
 
 
-    // 2. Pre-create Artifact Templates using the tool handler
+    // 2. Pre-create Artifact Templates FIRST using the tool handler
     if (Object.keys(knownArtifactTemplates).length < 2) {
         toolHandlers.create_artifact({
             name: "Debug Sword", type: "weapon", element: "physical", description: "A basic sword for testing.",
@@ -1523,50 +1536,65 @@ const initializeDebugContent = () => {
             name: "Cryo Amulet", type: "amulet", element: "cryo", description: "Chilling to the touch.",
             stats: { health_boost: 30, damage_boost: 0.05 }, visual_description: "Pale blue amulet"
         });
+        createdSomething = true;
     }
 
-    // 3. Pre-create Mob Templates using the tool handler
+    // 3. Pre-create Mob Templates NEXT using the tool handler
     if (Object.keys(knownMobTemplates).length < 2) {
         toolHandlers.create_mob({
-            name: "Debug Slime", element: "hydro", description: "A wobbly slime.", base_health: 50, base_damage: 5, attack_speed: 0.8, movement_speed: 1.5, xp_reward: 5,
-            loot_table: [], visual_description: "Blue translucent blob", behavior: "aggressive"
+             name: "Debug Slime", element: "hydro", description: "A wobbly slime.", base_health: 50, base_damage: 5, attack_speed: 0.8, movement_speed: 1.5, xp_reward: 5,
+             loot_table: [], visual_description: "Blue translucent blob", behavior: "aggressive"
         });
          toolHandlers.create_mob({
-            name: "Debug Goblin", element: "physical", description: "A weak goblin.", base_health: 80, base_damage: 8, attack_speed: 1, movement_speed: 2.5, xp_reward: 10,
+             name: "Debug Goblin", element: "physical", description: "A weak goblin.", base_health: 80, base_damage: 8, attack_speed: 1, movement_speed: 2.5, xp_reward: 10,
+            // Ensure loot table uses names/IDs created above (lowercase_with_underscores)
             loot_table: ["debug_sword"], visual_description: "Small green humanoid with club", behavior: "aggressive"
         });
          toolHandlers.create_mob({
             name: "Flame Imp", element: "pyro", description: "A mischievous fire spirit.", base_health: 60, base_damage: 12, attack_speed: 1.2, movement_speed: 3, xp_reward: 15,
-            loot_table: ["debug_orb"], visual_description: "Small winged creature made of fire", behavior: "ranged" // Assuming ranged mobs attack from distance
+            loot_table: ["debug_orb"], visual_description: "Small winged creature made of fire", behavior: "ranged"
         });
          toolHandlers.create_mob({
-             name: "Stone Golem (Boss)", element: "geo", description: "A large, slow guardian.", base_health: 300, base_damage: 25, attack_speed: 0.5, movement_speed: 1, xp_reward: 100,
-             loot_table: ["debug_sword", "cryo_amulet"], visual_description: "Hulking figure of rock", behavior: "aggressive"
-         });
+             name: "Stone Golem Boss", element: "geo", description: "A large, slow guardian.", base_health: 300, base_damage: 25, attack_speed: 0.5, movement_speed: 1, xp_reward: 100, // Removed parentheses from name for simplicity
+             loot_table: ["debug_sword", "cryo_amulet"], visual_description: "Hulking figure of rock", behavior: "aggressive" // Can drop multiple types
+          });
+         createdSomething = true;
     }
 
-    // 4. Pre-create a Dungeon using the tool handler
+    // 4. Pre-create a Dungeon LAST using the tool handler (if mobs exist)
     if (Object.keys(dungeons).length === 0 && Object.keys(knownMobTemplates).length >= 3) {
          toolHandlers.create_dungeon({
-             name: "Debug Den", theme_description: "A simple cave.", mob_types: ["debug_goblin", "flame_imp"], mob_count: 5, boss_type: "stone_golem_boss", boss_health_multiplier: 2, boss_damage_multiplier: 1.5, visual_description: "Mossy cave entrance"
+             name: "Debug Den",
+             theme_description: "A simple cave.",
+             mob_types: ["Debug Goblin", "Flame Imp"], // Reference by original name
+             mob_count: 5,
+             boss_type: "Stone Golem Boss", // Reference boss by its (now sanitized) name
+             boss_health_multiplier: 2,
+             boss_damage_multiplier: 1.5,
+             visual_description: "Mossy cave entrance"
          });
     }
 
 
     // 5. Spawn some initial mobs if none exist
-    if (Object.keys(mobs).length === 0 && Object.keys(knownMobTemplates).length > 0) {
+    if (Object.keys(mobs).length === 0 && Object.keys(knownMobTemplates).length >= 2) {
         spawnMob("debug_slime");
         spawnMob("debug_goblin");
+        createdSomething = true; // Technically already covered by mob template creation check
     }
 
      // 6. Spawn Player Bots (Simulated Players)
-     const desiredBots = 2;
+     const desiredBots = DESIRED_BOTS;
      const currentBots = Object.values(players).filter(p => p.isBot).length;
      for (let i = 0; i < desiredBots - currentBots; i++) {
          spawnPlayerBot(`Bot_${i + 1}`);
      }
 
-    log("Debug content initialization finished.");
+    if(createdSomething) {
+        log("Debug content initialization finished (created new items).");
+    } else {
+        log("Debug content initialization finished (content already existed).");
+    }
 };
 
 // --- Player Bot Logic ---
@@ -1594,7 +1622,7 @@ const spawnPlayerBot = (botId) => {
         stats: null, // Calculated below
         statusEffects: {},
         // Bot-specific state
-        state: "idle", // idle, seeking_dungeon, fighting, collecting, seeking_mob
+        state: "idle", // idle, seeking_dungeon, fighting, collecting, seeking_target
         lastStateChange: Date.now(),
         currentDungeonTarget: null, // ID of dungeon it's heading towards/in
     };
@@ -1708,9 +1736,9 @@ const playerBotAI = (botId) => {
          case 'idle':
              // Decide what to do next: Find dungeon? Find mobs?
              if (Object.keys(dungeons).length > 0) {
-                 setState('seeking_dungeon');
+                 setState('seeking_dungeon'); // Prioritize dungeons if available
              } else {
-                 setState('seeking_mob');
+                 setState('seeking_target'); // Otherwise hunt anything
              }
              break;
 
@@ -1743,27 +1771,41 @@ const playerBotAI = (botId) => {
                  }
              } else {
                  // No dungeons found or all are closing
-                 setState('seeking_mob'); // Fallback to hunting mobs
+                 setState('seeking_target'); // Fallback to hunting mobs/players
              }
              break;
 
-         case 'seeking_mob':
-             // Find nearest mob
-              let nearestMob = null;
-              let minDistMob = Infinity;
-              Object.values(mobs).forEach(mob => {
-                  if (mob.health > 0) {
+         case 'seeking_target': // Renamed from seeking_mob
+             // Find nearest valid target (mob or non-bot player)
+              let nearestTarget = null;
+              let minDist = Infinity;
+
+              // Check mobs first
+               Object.values(mobs).forEach(mob => {
+                   if (mob.health > 0) {
                        const dist = calculateDistance(bot.position, mob.position);
-                       if (dist < minDistMob) {
-                           minDistMob = dist;
-                           nearestMob = mob;
+                       if (dist < minDist) {
+                           minDist = dist;
+                           nearestTarget = mob;
                        }
                   }
               });
 
-              if(nearestMob) {
-                  bot.targetId = nearestMob.id;
-                  setState('fighting');
+               // Check players (non-bot)
+               Object.values(players).forEach(player => {
+                  if (player.health > 0 && player.id !== botId) { // Don't target self //  && !player.isBot or other bots
+                       const dist = calculateDistance(bot.position, player.position);
+                       if (dist < minDist) {
+                           minDist = dist;
+                           nearestTarget = player;
+                       }
+                  }
+              });
+
+              if(nearestTarget) {
+                   setState('fighting');
+                  log(`Bot ${botId} found target ${nearestTarget.id} (Type: ${nearestTarget.isPlayer ? 'Player' : 'Mob'}) at distance ${minDist.toFixed(1)}`);
+                  bot.targetId = nearestTarget.id;
               } else {
                    // No mobs found, wander or stay idle? Stay idle.
                    setState('idle');
@@ -1776,8 +1818,8 @@ const playerBotAI = (botId) => {
               if (!currentTarget || currentTarget.health <= 0) {
                   log(`Bot ${botId} target ${bot.targetId} defeated or gone.`);
                   bot.targetId = null;
-                   // Look for loot nearby before finding new target
-                   setState('collecting'); // Check for loot first
+                   // Target gone, look for loot nearby before finding new target
+                   setState('collecting');
                   // setState('seeking_mob'); // Find a new target immediately? Loot first is better.
                   break;
               }
@@ -1798,8 +1840,8 @@ const playerBotAI = (botId) => {
               } else {
                    // Target too far, give up?
                    log(`Bot ${botId} lost target ${bot.targetId} (too far).`);
-                   bot.targetId = null;
-                   setState('seeking_mob');
+                   bot.targetId = null; // Clear target
+                   setState('seeking_target'); // Look for a new one
               }
              break;
 
@@ -1825,7 +1867,7 @@ const playerBotAI = (botId) => {
                         log(`Bot ${botId} leaving defeated dungeon ${dungeon.name}`);
                         setState('idle'); // Dungeon cleared, go idle (will seek new dungeon or mobs)
                    } else {
-                        setState('seeking_mob'); // No active dungeon context, hunt mobs
+                        setState('seeking_target'); // No active dungeon context, hunt generic targets
                    }
               }
              break;
