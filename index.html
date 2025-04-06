@@ -1,0 +1,1461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Infinite MMORPG</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #222; color: white; font-family: sans-serif; }
+        canvas { display: block; }
+        #ui { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px; max-width: 300px; }
+        #chat { position: absolute; bottom: 10px; left: 10px; background: rgba(0,0,0,0.5); padding: 5px; border-radius: 5px; max-height: 100px; overflow-y: auto; width: 300px; font-size: 0.8em; }
+        #controls-help { position: absolute; bottom: 10px; right: 10px; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px; font-size: 0.8em;}
+        #joystick-left { position: absolute; bottom: 20px; left: 20px; width: 100px; height: 100px; background: rgba(255,255,255,0.2); border-radius: 50%; z-index: 10; }
+        #joystick-right { position: absolute; bottom: 20px; right: 20px; width: 100px; height: 100px; background: rgba(255,255,255,0.2); border-radius: 50%; z-index: 10; }
+        /* Hide joysticks on non-touch devices initially */
+        @media (pointer: fine) {
+            #joystick-left, #joystick-right { display: none; }
+        }
+        /* Show joysticks if touch is detected */
+        @media (pointer: coarse) {
+            #joystick-left, #joystick-right { display: block; }
+        }
+        #version-mismatch { display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); color: yellow; z-index: 100; text-align: center; padding-top: 20%; font-size: 1.5em; }
+         .artifact-slot { border: 1px solid #555; padding: 5px; margin-bottom: 3px; min-height: 30px; background: rgba(255,255,255,0.1); cursor: pointer; }
+         .artifact-slot.active { border: 2px solid lime; }
+         .artifact-slot.equipped { background: rgba(100, 255, 100, 0.2); }
+         button { margin-top: 5px; padding: 3px 6px;}
+         #debug-log { position: absolute; top: 10px; right: 10px; width: 300px; max-height: 200px; overflow-y: scroll; background: rgba(0,0,0,0.6); font-size: 0.7em; display: none; }
+         .entity-label {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-size: 10px;
+            white-space: nowrap;
+            pointer-events: none; /* So they don't interfere with mouse clicks */
+            transform: translateX(-50%); /* Center horizontally */
+            text-align: center;
+        }
+        .player-label { color: lime; }
+        .mob-label { color: yellow; }
+        .boss-label { color: red; font-weight: bold;}
+        .artifact-label { color: cyan; }
+        .gate-label { color: magenta; }
+
+        progress { width: 100%; height: 5px; appearance: none; -webkit-appearance: none; border: none; }
+        progress::-webkit-progress-bar { background-color: #555; }
+        progress::-webkit-progress-value { background-color: red; }
+        .player-health::-webkit-progress-value { background-color: lime; }
+
+
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div>Player ID: <span id="player-id"></span></div>
+        <div>Level: <span id="player-level">1</span></div>
+        <div>XP: <span id="player-xp">0</span></div>
+        <div>Health: <span id="player-health">100</span> / <span id="player-max-health">100</span></div>
+        <progress id="player-health-bar" value="100" max="100" class="player-health"></progress>
+        <div style="margin-top: 10px;">Equipped Artifacts (Click to set active):</div>
+        <div id="equipped-artifacts">
+            <div id="slot-0" class="artifact-slot" data-slot="0">Slot 1: Empty</div>
+            <div id="slot-1" class="artifact-slot" data-slot="1">Slot 2: Empty</div>
+            <div id="slot-2" class="artifact-slot" data-slot="2">Slot 3: Empty</div>
+            <div id="slot-3" class="artifact-slot" data-slot="3">Slot 4: Empty</div>
+        </div>
+         <div style="margin-top: 10px;">Inventory (Click to equip):</div>
+         <div id="inventory-list" style="max-height: 100px; overflow-y: auto; border: 1px solid #444; padding: 5px;">
+             <!-- Inventory items will be added here -->
+         </div>
+        <button id="gacha-button">Wish (Ready!)</button>
+        <button id="pickup-button">Pickup Item (E)</button>
+        <button id="attack-button">Attack (Space)</button>
+    </div>
+    <div id="chat"></div>
+     <div id="controls-help">
+        Controls:<br>
+        WASD: Move | Mouse: Look | Space/Click: Attack | E: Pickup | 1-4: Set Active Artifact<br>
+        Mobile: Left Stick: Move | Right Stick: Look | Buttons: Actions
+    </div>
+    <div id="joystick-left"></div>
+    <div id="joystick-right"></div>
+    <div id="version-mismatch">
+        Game client outdated. Please wait, downloading new version... <span id="reload-timer">10</span>s
+    </div>
+    <div id="debug-log"></div>
+     <!-- Entity Labels Container -->
+    <div id="labels-container"></div>
+
+
+    <script type="module">
+        // index.html - Frontend Logic
+        import { io } from "https://esm.run/socket.io-client@4.7.4";
+        import nipplejs from "https://esm.run/nipplejs@0.10.1";
+        import * as THREE from "https://esm.run/three@0.160.0";
+
+        // --- Client Configuration ---
+        const CLIENT_VERSION = "1.0.0"; // Must match server VERSION
+        let SERVER_VERSION = "";
+        let DEBUG_ENABLED = false; // Set by server on init
+
+        // --- DOM Elements ---
+        const ui = document.getElementById('ui');
+        const chat = document.getElementById('chat');
+        const debugLog = document.getElementById('debug-log');
+        const playerIdSpan = document.getElementById('player-id');
+        const playerLevelSpan = document.getElementById('player-level');
+        const playerXpSpan = document.getElementById('player-xp');
+        const playerHealthSpan = document.getElementById('player-health');
+        const playerMaxHealthSpan = document.getElementById('player-max-health');
+        const playerHealthBar = document.getElementById('player-health-bar');
+        const equippedArtifactsDiv = document.getElementById('equipped-artifacts');
+        const inventoryListDiv = document.getElementById('inventory-list');
+        const gachaButton = document.getElementById('gacha-button');
+        const pickupButton = document.getElementById('pickup-button');
+        const attackButton = document.getElementById('attack-button');
+        const versionMismatchDiv = document.getElementById('version-mismatch');
+        const reloadTimerSpan = document.getElementById('reload-timer');
+        const labelsContainer = document.getElementById('labels-container');
+
+        // --- Helper Functions ---
+        const logDebug = (...args) => DEBUG_ENABLED && console.log('[CLIENT]', ...args);
+        const addLogMessage = (message, element = chat, isDebug = false) => {
+            if (!DEBUG_ENABLED && isDebug) return; // Don't show debug logs if disabled
+            const logElement = isDebug ? debugLog : element;
+            const msgDiv = document.createElement('div');
+            msgDiv.textContent = message;
+            logElement.appendChild(msgDiv);
+            logElement.scrollTop = logElement.scrollHeight; // Auto-scroll
+             // Limit log lines
+             const maxLines = isDebug ? 100 : 20;
+             while (logElement.children.length > maxLines) {
+                 logElement.removeChild(logElement.firstChild);
+             }
+        };
+
+        // --- Game State (Client Side) ---
+        let socket = null;
+        let playerId = null;
+        let gameScene = {}; // Stores meshes { players: {}, mobs: {}, artifacts: {}, dungeons: {} }
+        let playerState = { // Local player specific data
+            inventory: {},
+            equipped: [null, null, null, null],
+            activeSlot: 0,
+            stats: {},
+            xp: 0,
+            level: 1,
+            nextGachaTime: 0,
+            health: 100,
+            maxHealth: 100,
+        };
+        let knownElementsClient = {}; // Received from server
+        let lastServerState = null; // Store last received full state for interpolation/reference
+        let isPointerLocked = false;
+        let isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+
+        // --- Version Check ---
+        const checkVersion = async () => {
+            try {
+                const response = await fetch('/version');
+                if (!response.ok) throw new Error('Failed to fetch version');
+                const data = await response.json();
+                SERVER_VERSION = data.version;
+                logDebug(`Client Version: ${CLIENT_VERSION}, Server Version: ${SERVER_VERSION}`);
+                if (CLIENT_VERSION !== SERVER_VERSION) {
+                    showVersionMismatch();
+                    return false;
+                }
+                return true;
+            } catch (error) {
+                console.error("Version check failed:", error);
+                addLogMessage("Error: Could not connect to server for version check.", chat);
+                return false; // Assume mismatch if check fails
+            }
+        };
+
+        const showVersionMismatch = () => {
+            versionMismatchDiv.style.display = 'block';
+            let countdown = 10;
+            reloadTimerSpan.textContent = countdown;
+            const interval = setInterval(() => {
+                countdown--;
+                reloadTimerSpan.textContent = countdown;
+                if (countdown <= 0) {
+                    clearInterval(interval);
+                    // Force reload - could try fetching new client.js, but reload is simpler
+                     addLogMessage("Reloading page to get new version...", chat);
+                    window.location.reload(true); // Force reload bypassing cache
+                }
+            }, 1000);
+        };
+
+        // --- Three.js Setup ---
+        let scene, camera, renderer, clock, playerMesh, floorMesh;
+        const cameraOffset = new THREE.Vector3(0, 8, 12); // Distance behind and above player
+        const entities = {}; // Store references { id: { mesh: ThreeObject, data: ServerData } }
+        const entityLabels = {}; // { id: LabelDivElement }
+
+        function initThree() {
+            logDebug("Initializing Three.js");
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x222222);
+            scene.fog = new THREE.Fog(0x222222, 20, 100); // Add fog for depth
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true; // Enable shadows
+            document.body.appendChild(renderer.domElement);
+
+            clock = new THREE.Clock();
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0xcccccc, 0.6);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(5, 15, 7);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 1024;
+            directionalLight.shadow.mapSize.height = 1024;
+             directionalLight.shadow.camera.near = 0.5;
+             directionalLight.shadow.camera.far = 50;
+             directionalLight.shadow.camera.left = -50;
+             directionalLight.shadow.camera.right = 50;
+             directionalLight.shadow.camera.top = 50;
+             directionalLight.shadow.camera.bottom = -50;
+
+            scene.add(directionalLight);
+            // const lightHelper = new THREE.DirectionalLightHelper(directionalLight, 5); // Helper viz
+            // scene.add(lightHelper);
+             // const shadowHelper = new THREE.CameraHelper(directionalLight.shadow.camera);
+             // scene.add(shadowHelper);
+
+
+            // Floor
+            const floorGeometry = new THREE.PlaneGeometry(100, 100); // Match arena size?
+            const floorMaterial = new THREE.MeshStandardMaterial({ color: 0x808080, side: THREE.DoubleSide });
+            floorMesh = new THREE.Mesh(floorGeometry, floorMaterial);
+            floorMesh.rotation.x = -Math.PI / 2;
+            floorMesh.receiveShadow = true;
+            scene.add(floorMesh);
+
+            // Player Placeholder Mesh (initialized when player ID is known)
+            // Will be created in 'init_state' handler
+
+            gameScene = { players: {}, mobs: {}, artifacts: {}, dungeons: {} }; // Initialize mesh groups
+
+            window.addEventListener('resize', onWindowResize, false);
+             logDebug("Three.js initialized");
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+         function getEntityColor(entityData) {
+             if (entityData.color) return entityData.color; // Use color from server if provided
+             if (entityData.isPlayer) return 0x00ff00; // Default Player Green
+             if (entityData.isMob) return 0xffff00; // Default Mob Yellow
+             if (entityData.isArtifact) return 0x00ffff; // Default Artifact Cyan
+             if (entityData.isDungeon) return 0xff00ff; // Default Dungeon Magenta
+             return 0xffffff; // Default White
+         }
+
+        function createOrUpdateEntityMesh(entityData) {
+            const id = entityData.id;
+            let entityGroup = null;
+            let geometry, material, mesh;
+            let isNew = false;
+            let entityType = '';
+
+            // Determine type and group
+            if (entities[id]) {
+                mesh = entities[id].mesh;
+                 entityType = entities[id].type; // Get existing type
+            } else {
+                isNew = true;
+                 // Determine type from data properties
+                 if(id === playerId) entityType = 'player';
+                 else if (lastServerState?.players?.find(p => p.id === id)) entityType = 'player';
+                 else if (lastServerState?.mobs?.find(m => m.id === id)) entityType = 'mob';
+                 else if (lastServerState?.artifacts?.find(a => a.id === id)) entityType = 'artifact';
+                 else if (lastServerState?.dungeons?.find(d => d.id === id)) entityType = 'dungeon';
+                 else { logDebug(`Unknown entity type for ID ${id}`); return; } // Cannot determine type
+
+
+                const color = getEntityColor(entityData);
+                material = new THREE.MeshStandardMaterial({ color: color, roughness: 0.7, metalness: 0.2 });
+
+                switch(entityType) {
+                    case 'player':
+                        geometry = new THREE.CapsuleGeometry(0.5, 1.0, 4, 8); // Height 1 + 0.5*2 = 2
+                        mesh = new THREE.Mesh(geometry, material);
+                        mesh.castShadow = true;
+                         mesh.position.y = 1.0; // Center of capsule is at height 1
+                        if (id === playerId) playerMesh = mesh; // Assign local player mesh
+                        break;
+                    case 'mob':
+                         geometry = new THREE.BoxGeometry(1, 1, 1); // Cube for generic mob
+                         // Maybe use different shapes based on visual description later?
+                         if(entityData.visual?.toLowerCase().includes("slime") || entityData.visual?.toLowerCase().includes("blob")) {
+                             geometry = new THREE.SphereGeometry(0.6, 16, 8);
+                         } else if (entityData.visual?.toLowerCase().includes("golem")) {
+                              geometry = new THREE.BoxGeometry(1.5, 2, 1.5);
+                         } else if (entityData.visual?.toLowerCase().includes("sprite") || entityData.visual?.toLowerCase().includes("imp")) {
+                              geometry = new THREE.ConeGeometry(0.4, 0.8, 8);
+                         }
+                         mesh = new THREE.Mesh(geometry, material);
+                         mesh.castShadow = true;
+                         mesh.position.y = geometry.parameters.height ? geometry.parameters.height / 2 : 0.5; // Adjust height based on shape
+                         if(entityData.isBoss) { // Make bosses bigger
+                             mesh.scale.set(1.5, 1.5, 1.5);
+                             mesh.position.y *= 1.5;
+                         }
+                        break;
+                    case 'artifact':
+                        geometry = new THREE.IcosahedronGeometry(0.3, 0); // Simple gem shape
+                        // Use color/element for visual hint
+                        mesh = new THREE.Mesh(geometry, material);
+                        mesh.castShadow = true;
+                        mesh.position.y = 0.3; // Sit on ground
+                        break;
+                     case 'dungeon':
+                         // Represent dungeon gates
+                          geometry = new THREE.TorusGeometry(1.5, 0.3, 8, 32); // A ring portal
+                           // Change color based on visual description?
+                          if(entityData.gateVisual?.toLowerCase().includes("fiery") || entityData.gateVisual?.toLowerCase().includes("molten")) {
+                                material.color.set(0xff6600);
+                                material.emissive = new THREE.Color(0xaa3300); // Make it glow a bit
+                          } else if (entityData.gateVisual?.toLowerCase().includes("icy") || entityData.gateVisual?.toLowerCase().includes("glacial")) {
+                                 material.color.set(0xadd8e6);
+                                  material.emissive = new THREE.Color(0x5588aa);
+                          } else {
+                                material.color.set(0x8a2be2); // Default purple portal
+                                material.emissive = new THREE.Color(0x441166);
+                          }
+                          mesh = new THREE.Mesh(geometry, material);
+                          mesh.castShadow = false; // Gates probably don't cast shadows
+                          mesh.position.y = 1.8; // Center the torus vertically
+                          mesh.rotation.y = Math.PI / 2; // Stand upright
+                          break;
+                    default:
+                         logDebug(`Cannot create mesh for unknown entity type: ${entityType}`);
+                         return; // Don't create mesh if type unknown
+                }
+
+                entities[id] = { mesh: mesh, data: entityData, type: entityType }; // Store type
+                scene.add(mesh);
+                createOrUpdateEntityLabel(id, entityData, entityType); // Create label
+                logDebug(`Created ${entityType} mesh for ${id}`);
+            }
+
+             // Update common properties - Interpolate position smoothly
+             const targetPosition = new THREE.Vector3(entityData.position.x, entities[id].mesh.position.y, entityData.position.z); // Keep current Y unless it's an artifact/gate
+             if (entityType === 'artifact' || entityType === 'dungeon') {
+                 targetPosition.y = entityData.position.y; // Use server Y for artifacts/gates
+             } else if(entityType === 'player' || entityType === 'mob') {
+                 // Keep character standing on floor unless server sends specific Y
+                  mesh.position.y = mesh.geometry.parameters.height ? mesh.geometry.parameters.height / 2 * mesh.scale.y : 0.5 * mesh.scale.y;
+                  targetPosition.y = mesh.position.y;
+             }
+
+
+             // Smooth position interpolation
+             entities[id].mesh.position.lerp(targetPosition, 0.3); // Adjust lerp factor for smoothness
+
+
+             // Update rotation for players/mobs based on lookDirection or movement
+             if ((entityType === 'player' || entityType === 'mob') && entityData.lookDirection) {
+                 const lookDir = new THREE.Vector3(entityData.lookDirection.x, 0, entityData.lookDirection.z).normalize();
+                 if (lookDir.lengthSq() > 0.001) { // Avoid zero vector issues
+                     // Calculate target quaternion
+                     const targetQuaternion = new THREE.Quaternion();
+                     const matrix = new THREE.Matrix4();
+                     matrix.lookAt(entities[id].mesh.position, entities[id].mesh.position.clone().add(lookDir), new THREE.Vector3(0, 1, 0));
+                     targetQuaternion.setFromRotationMatrix(matrix);
+
+                     // Smooth rotation interpolation (Slerp)
+                     entities[id].mesh.quaternion.slerp(targetQuaternion, 0.2);
+                 }
+             } else if (entityType === 'artifact') {
+                  // Make artifacts spin slowly
+                  entities[id].mesh.rotation.y += 0.01;
+             } else if (entityType === 'dungeon') {
+                  // Make gates pulse or shimmer? Animate scale slightly?
+                  const pulse = Math.sin(Date.now() * 0.002) * 0.05 + 1.0;
+                  entities[id].mesh.scale.set(pulse, pulse, pulse);
+                   entities[id].mesh.rotation.z += 0.005; // Slow spin on Z axis
+             }
+
+
+            // Update color if changed (e.g., element change) - compare with stored data
+            const currentColor = getEntityColor(entityData);
+            if (!isNew && entities[id].mesh.material.color.getHex() !== currentColor) {
+                 entities[id].mesh.material.color.setHex(currentColor);
+            }
+
+             // Update stored data
+             entities[id].data = entityData;
+
+             // Update label position and content
+             updateEntityLabelPosition(id);
+             if (!isNew) { // Update label content if not new (name/health etc might change)
+                 createOrUpdateEntityLabel(id, entityData, entityType);
+             }
+        }
+
+        function removeEntityMesh(id) {
+            if (entities[id]) {
+                logDebug(`Removing entity mesh: ${id}`);
+                scene.remove(entities[id].mesh);
+                if (entities[id].mesh.geometry) entities[id].mesh.geometry.dispose();
+                if (entities[id].mesh.material) entities[id].mesh.material.dispose();
+                 removeEntityLabel(id); // Remove label too
+                delete entities[id];
+            }
+             // Also remove from specific gameScene groups if they exist
+             for (const groupName in gameScene) {
+                if (gameScene[groupName][id]) {
+                    delete gameScene[groupName][id];
+                }
+            }
+        }
+
+         function createOrUpdateEntityLabel(id, entityData, entityType) {
+             let labelDiv = entityLabels[id];
+             if (!labelDiv) {
+                 labelDiv = document.createElement('div');
+                 labelDiv.classList.add('entity-label');
+                 labelsContainer.appendChild(labelDiv);
+                 entityLabels[id] = labelDiv;
+             }
+
+             // Base content: Name
+             let labelContent = entityData.name || `Entity ${id.substring(0, 4)}`;
+             labelDiv.className = 'entity-label'; // Reset classes
+
+              // Add type specific classes and content
+              let healthBarHtml = '';
+             if (entityType === 'player') {
+                 labelDiv.classList.add('player-label');
+                 labelContent = `Lvl ${entityData.level} ${labelContent}`;
+                  if(entityData.health !== undefined && entityData.maxHealth > 0) {
+                     healthBarHtml = `<progress value="${entityData.health}" max="${entityData.maxHealth}" class="player-health"></progress>`;
+                  }
+             } else if (entityType === 'mob') {
+                  labelDiv.classList.add('mob-label');
+                  if(entityData.isBoss) {
+                      labelDiv.classList.add('boss-label');
+                      labelContent = `[BOSS] ${labelContent}`;
+                  }
+                   if(entityData.health !== undefined && entityData.maxHealth > 0) {
+                      healthBarHtml = `<progress value="${entityData.health}" max="${entityData.maxHealth}"></progress>`; // Default red for mobs
+                   }
+             } else if (entityType === 'artifact') {
+                 labelDiv.classList.add('artifact-label');
+             } else if (entityType === 'dungeon') {
+                  labelDiv.classList.add('gate-label');
+                  if(entityData.isClosing) {
+                      labelContent += ' (Closing!)';
+                  }
+             }
+
+             labelDiv.innerHTML = `<div>${labelContent}</div>${healthBarHtml}`;
+         }
+
+         function updateEntityLabelPosition(id) {
+             const labelDiv = entityLabels[id];
+             const mesh = entities[id]?.mesh;
+             if (!labelDiv || !mesh) return;
+
+             const position = new THREE.Vector3();
+             // Position label slightly above the mesh center or highest point
+             const meshHeight = mesh.geometry.boundingBox ? mesh.geometry.boundingBox.max.y : (mesh.geometry.parameters.height || 1.0);
+             position.setFromMatrixPosition(mesh.matrixWorld);
+             position.y += meshHeight * mesh.scale.y * 0.5 + 0.5; // Adjust offset based on mesh size/scale
+
+             const vector = position.project(camera);
+             const x = (vector.x * 0.5 + 0.5) * renderer.domElement.clientWidth;
+             const y = (vector.y * -0.5 + 0.5) * renderer.domElement.clientHeight;
+
+             // Check if label is behind the camera
+             if (vector.z > 1) {
+                  labelDiv.style.display = 'none';
+             } else {
+                  labelDiv.style.display = 'block';
+                  labelDiv.style.left = `${x}px`;
+                  labelDiv.style.top = `${y}px`;
+             }
+         }
+
+        function removeEntityLabel(id) {
+            const labelDiv = entityLabels[id];
+            if (labelDiv) {
+                labelDiv.remove();
+                delete entityLabels[id];
+            }
+        }
+
+        function updateAllLabels() {
+             if (!renderer || !camera) return; // Ensure THREE is initialized
+             Object.keys(entityLabels).forEach(id => {
+                 if (entities[id]) {
+                     updateEntityLabelPosition(id);
+                 } else {
+                      // Clean up labels for entities that no longer exist
+                      removeEntityLabel(id);
+                 }
+             });
+         }
+
+
+        // --- Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+            const deltaTime = clock.getDelta();
+
+            // Update controls
+            handleControls(deltaTime);
+
+             // Update camera position to follow player
+             if (playerMesh && playerId && entities[playerId]) {
+                // Target position calculation
+                 const playerPosition = new THREE.Vector3().setFromMatrixPosition(playerMesh.matrixWorld);
+                 const targetCameraPosition = playerPosition.clone().add(cameraOffset);
+
+                // Smooth camera movement (lerp)
+                 camera.position.lerp(targetCameraPosition, 0.1); // Adjust lerp factor for desired smoothness
+
+                 // Camera lookAt - always look slightly ahead of the player model's center
+                 const lookAtPosition = playerPosition.clone();
+                 lookAtPosition.y += 1.0; // Look slightly above the player's base
+                 camera.lookAt(lookAtPosition);
+
+                 // Send player state updates periodically
+                 sendPlayerState();
+             } else if (playerId && !playerMesh && entities[playerId]) {
+                 // Player mesh might not be created immediately on init
+                 playerMesh = entities[playerId].mesh;
+             }
+
+
+            // Render scene
+            if(renderer && scene && camera) {
+                renderer.render(scene, camera);
+                updateAllLabels(); // Update label positions after render calculations
+            }
+        }
+
+        // --- Controls ---
+        const keys = {}; // Keep track of pressed keys
+        const mouse = { x: 0, y: 0, dx: 0, dy: 0, left: false, right: false };
+        let moveVector = new THREE.Vector3();
+        let lookVector = new THREE.Vector2(); // For accumulating mouse/joystick look changes
+        let leftJoystick = { active: false, vector: { x: 0, y: 0 } };
+        let rightJoystick = { active: false, vector: { x: 0, y: 0 } };
+        let gamepad = null;
+
+        function setupControls() {
+             logDebug("Setting up controls...");
+            // Keyboard
+            window.addEventListener('keydown', (e) => keys[e.code] = true);
+            window.addEventListener('keyup', (e) => {
+                keys[e.code] = false;
+                // Handle single press actions on key up
+                if (e.code === 'KeyE') pickupItem();
+                if (e.code === 'Space') attack();
+                if (e.code === 'Digit1') setActiveArtifact(0);
+                if (e.code === 'Digit2') setActiveArtifact(1);
+                if (e.code === 'Digit3') setActiveArtifact(2);
+                if (e.code === 'Digit4') setActiveArtifact(3);
+                 if (e.code === 'KeyG') performGachaWish(); // G for Gacha
+                 if (e.code === 'KeyI') toggleInventoryDisplay(); // I for Inventory (placeholder)
+            });
+
+            // Mouse Look (Pointer Lock)
+            document.addEventListener('click', () => {
+                if (!isPointerLocked && !isTouchDevice) { // Don't lock on touch devices
+                    document.body.requestPointerLock();
+                } else {
+                     // Handle click as attack if pointer not locked (e.g., mobile fallback)
+                     attack();
+                }
+            });
+            document.addEventListener('pointerlockchange', () => {
+                isPointerLocked = document.pointerLockElement === document.body;
+                 logDebug("Pointer lock changed:", isPointerLocked);
+            }, false);
+            document.addEventListener('mousemove', (e) => {
+                if (isPointerLocked) {
+                    // Accumulate mouse movement for smoother updates in handleControls
+                    lookVector.x -= e.movementX * 0.002; // Adjust sensitivity
+                    lookVector.y -= e.movementY * 0.002;
+                     // Clamp vertical look
+                     lookVector.y = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, lookVector.y));
+                }
+            });
+             document.addEventListener('mousedown', (e) => {
+                 if (e.button === 0) mouse.left = true; // Left click
+                 if (e.button === 2) mouse.right = true; // Right click
+                  if (isPointerLocked && e.button === 0) {
+                      attack(); // Attack on left click if locked
+                  }
+             });
+              document.addEventListener('mouseup', (e) => {
+                  if (e.button === 0) mouse.left = false;
+                  if (e.button === 2) mouse.right = false;
+              });
+
+
+            // Mobile Joysticks (nipplejs)
+            if (isTouchDevice) {
+                 logDebug("Touch device detected, initializing joysticks.");
+                const leftZone = document.getElementById('joystick-left');
+                const rightZone = document.getElementById('joystick-right');
+                leftZone.style.display = 'block'; // Ensure visible
+                rightZone.style.display = 'block';
+
+                const nippleOptions = {
+                    mode: 'static', // 'dynamic' or 'static'
+                    color: 'white',
+                    size: 100,
+                    threshold: 0.1,
+                    fadeTime: 250,
+                };
+
+                const managerLeft = nipplejs.create({ ...nippleOptions, zone: leftZone, position: { left: '70px', bottom: '70px' } });
+                managerLeft.on('move', (evt, data) => {
+                    if (data.vector) {
+                        leftJoystick.active = true;
+                        leftJoystick.vector = data.vector; // y is forward/backward, x is left/right
+                    }
+                }).on('end', () => {
+                    leftJoystick.active = false;
+                    leftJoystick.vector = { x: 0, y: 0 };
+                });
+
+                const managerRight = nipplejs.create({ ...nippleOptions, zone: rightZone, position: { right: '70px', bottom: '70px' } });
+                managerRight.on('move', (evt, data) => {
+                     if (data.vector) {
+                        rightJoystick.active = true;
+                        // Use right stick for looking (like mouse)
+                        lookVector.x -= data.vector.x * 0.03; // Adjust sensitivity
+                        lookVector.y += data.vector.y * 0.03; // Invert Y for typical look controls
+                        lookVector.y = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, lookVector.y));
+                    }
+                }).on('end', () => {
+                     rightJoystick.active = false;
+                     // Keep last look direction, don't reset vector
+                });
+            } else {
+                 logDebug("No touch device detected, hiding joysticks.");
+                 document.getElementById('joystick-left').style.display = 'none';
+                 document.getElementById('joystick-right').style.display = 'none';
+            }
+
+
+            // Gamepad API
+            window.addEventListener("gamepadconnected", (e) => {
+                 logDebug("Gamepad connected:", e.gamepad.id);
+                 gamepad = e.gamepad;
+                 // Might need polling loop for gamepad state if events aren't reliable
+                 pollGamepad();
+            });
+            window.addEventListener("gamepaddisconnected", (e) => {
+                 logDebug("Gamepad disconnected:", e.gamepad.id);
+                 if (gamepad && gamepad.index === e.gamepad.index) {
+                     gamepad = null;
+                 }
+            });
+
+            // UI Button Listeners
+            gachaButton.onclick = performGachaWish;
+            pickupButton.onclick = pickupItem;
+            attackButton.onclick = attack;
+
+             // Equip/Active listeners
+             equippedArtifactsDiv.addEventListener('click', (e) => {
+                 const slotDiv = e.target.closest('.artifact-slot');
+                 if (slotDiv && slotDiv.dataset.slot) {
+                     setActiveArtifact(parseInt(slotDiv.dataset.slot));
+                 }
+             });
+              inventoryListDiv.addEventListener('click', (e) => {
+                  const itemDiv = e.target.closest('.inventory-item');
+                  if(itemDiv && itemDiv.dataset.inventoryId) {
+                      promptEquipItem(itemDiv.dataset.inventoryId, itemDiv.dataset.itemName);
+                  }
+              });
+
+             logDebug("Controls setup finished.");
+        }
+
+        let lastGamepadState = null;
+        function pollGamepad() {
+             if (!gamepad) return;
+
+             const currentGamepad = navigator.getGamepads()[gamepad.index]; // Get current state
+             if (!currentGamepad) {
+                 gamepad = null; // Lost connection
+                 return;
+             }
+
+              // --- Read Axes ---
+              const deadzone = 0.15;
+              // Left Stick (Movement) - Axes 0 (X), 1 (Y)
+              let moveX = currentGamepad.axes[0] || 0;
+              let moveY = currentGamepad.axes[1] || 0; // Often inverted Y
+              if (Math.abs(moveX) < deadzone) moveX = 0;
+              if (Math.abs(moveY) < deadzone) moveY = 0;
+              // Simulate WASD based on stick input for movement logic
+              keys['GamepadMoveForward'] = moveY < -deadzone;
+              keys['GamepadMoveBackward'] = moveY > deadzone;
+              keys['GamepadMoveLeft'] = moveX < -deadzone;
+              keys['GamepadMoveRight'] = moveX > deadzone;
+              // Store magnitude for speed adjustment if needed (optional)
+              // moveMagnitude = Math.sqrt(moveX*moveX + moveY*moveY);
+
+              // Right Stick (Look) - Axes 2 (X), 3 (Y)
+              let lookX = currentGamepad.axes[2] || 0;
+              let lookY = currentGamepad.axes[3] || 0; // Often inverted Y
+              if (Math.abs(lookX) < deadzone) lookX = 0;
+              if (Math.abs(lookY) < deadzone) lookY = 0;
+              // Apply look changes directly (similar to mouse)
+              if (Math.abs(lookX) > 0 || Math.abs(lookY) > 0) {
+                  lookVector.x -= lookX * 0.04; // Adjust sensitivity
+                  lookVector.y -= lookY * 0.04; // Adjust sensitivity (Y might need inversion depending on gamepad)
+                  lookVector.y = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, lookVector.y));
+              }
+
+
+             // --- Read Buttons ---
+             // Example: A/Cross (button 0) for Attack, X/Square (button 2) for Pickup
+             const buttonAttackPressed = currentGamepad.buttons[0]?.pressed;
+             const buttonPickupPressed = currentGamepad.buttons[2]?.pressed;
+             const buttonGachaPressed = currentGamepad.buttons[3]?.pressed; // Y/Triangle
+
+             // Trigger actions on button *press* (rising edge)
+             if (buttonAttackPressed && !lastGamepadState?.buttons[0]?.pressed) {
+                 attack();
+             }
+             if (buttonPickupPressed && !lastGamepadState?.buttons[2]?.pressed) {
+                 pickupItem();
+             }
+              if (buttonGachaPressed && !lastGamepadState?.buttons[3]?.pressed) {
+                 performGachaWish();
+             }
+             // D-pad or other buttons for activating artifacts 1-4?
+             // Example: D-pad Up (12), Down (13), Left (14), Right (15)
+             if (currentGamepad.buttons[14]?.pressed && !lastGamepadState?.buttons[14]?.pressed) setActiveArtifact(0); // D-Left = Slot 1
+             if (currentGamepad.buttons[12]?.pressed && !lastGamepadState?.buttons[12]?.pressed) setActiveArtifact(1); // D-Up = Slot 2
+             if (currentGamepad.buttons[15]?.pressed && !lastGamepadState?.buttons[15]?.pressed) setActiveArtifact(2); // D-Right = Slot 3
+             if (currentGamepad.buttons[13]?.pressed && !lastGamepadState?.buttons[13]?.pressed) setActiveArtifact(3); // D-Down = Slot 4
+
+
+             // Store current state for edge detection next frame
+             // Need a deep copy or careful cloning if button/axis objects are mutable
+             lastGamepadState = {
+                 axes: [...currentGamepad.axes],
+                 buttons: currentGamepad.buttons.map(b => ({ pressed: b.pressed, touched: b.touched, value: b.value })),
+             };
+
+             requestAnimationFrame(pollGamepad); // Continue polling
+         }
+
+
+        function handleControls(deltaTime) {
+            if (!playerMesh || !playerId) return; // Need player object
+
+            const moveSpeed = 5.0 * deltaTime; // Base move speed units per second
+            const lookSpeed = 1.5 * deltaTime; // Look speed (used if accumulating)
+
+             // --- Movement ---
+            moveVector.set(0, 0, 0);
+            let moving = false;
+
+             // Keyboard Input
+            if (keys['KeyW'] || keys['ArrowUp'] || keys['GamepadMoveForward']) { moveVector.z -= 1; moving = true; }
+            if (keys['KeyS'] || keys['ArrowDown'] || keys['GamepadMoveBackward']) { moveVector.z += 1; moving = true; }
+            if (keys['KeyA'] || keys['ArrowLeft'] || keys['GamepadMoveLeft']) { moveVector.x -= 1; moving = true; }
+            if (keys['KeyD'] || keys['ArrowRight'] || keys['GamepadMoveRight']) { moveVector.x += 1; moving = true; }
+
+            // Left Joystick Input
+            if (leftJoystick.active) {
+                moveVector.x += leftJoystick.vector.x;
+                moveVector.z -= leftJoystick.vector.y; // NippleJS Y is positive up
+                 moving = true;
+            }
+
+             // --- Looking ---
+             // Look direction is handled by accumulating lookVector (from mouse/right stick/gamepad)
+             // Apply accumulated look changes here
+             const currentQuaternion = playerMesh.quaternion; // Use mesh quat directly
+             const euler = new THREE.Euler(0, 0, 0, 'YXZ'); // Use YXZ order for FPS-style controls
+              // Get current Euler angles from the mesh's quaternion
+             euler.setFromQuaternion(currentQuaternion);
+
+             // Apply accumulated changes
+             euler.y = lookVector.x; // Yaw from horizontal movement
+             euler.x = lookVector.y; // Pitch from vertical movement
+
+             // Apply rotation back to the mesh quaternion
+             currentQuaternion.setFromEuler(euler);
+
+
+            // Apply movement based on camera/player orientation
+            if (moving && playerMesh) {
+                // Get player's forward and right vectors based on current rotation
+                 const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(playerMesh.quaternion);
+                 const right = new THREE.Vector3(1, 0, 0).applyQuaternion(playerMesh.quaternion);
+
+                 // Calculate final move direction relative to player facing
+                 const moveDirection = new THREE.Vector3();
+                 moveDirection.add(forward.multiplyScalar(-moveVector.z)); // Z is forward/backward
+                 moveDirection.add(right.multiplyScalar(moveVector.x));   // X is left/right
+                 moveDirection.normalize(); // Ensure consistent speed regardless of direction combination
+
+                // Apply movement
+                playerMesh.position.add(moveDirection.multiplyScalar(moveSpeed));
+
+                // Basic Collision/Boundary Check (Client side prediction)
+                const arenaHalfSize = 50; // Should match server ARENA_SIZE
+                 playerMesh.position.x = Math.max(-arenaHalfSize, Math.min(arenaHalfSize, playerMesh.position.x));
+                 playerMesh.position.z = Math.max(-arenaHalfSize, Math.min(arenaHalfSize, playerMesh.position.z));
+                 // Keep player on the ground (Y position managed by mesh creation/update)
+                 playerMesh.position.y = playerMesh.geometry.parameters.height ? playerMesh.geometry.parameters.height / 2 * playerMesh.scale.y : 0.5 * playerMesh.scale.y;
+            }
+        }
+
+        // --- Player Actions ---
+        function attack() {
+             if (!socket || !playerId) return;
+             logDebug("Sending attack request");
+             socket.emit('player_attack', {}); // Server determines target based on look direction / proximity
+              // Optional: Send client-predicted target?
+              // socket.emit('player_attack', { targetId: predictedTargetId });
+         }
+
+        function pickupItem() {
+            if (!socket || !playerId) return;
+            logDebug("Sending pickup request");
+            socket.emit('player_pickup_artifact');
+        }
+
+         function equipItem(inventoryId, slotIndex) {
+             if (!socket || !playerId || !inventoryId || slotIndex === undefined) return;
+              logDebug(`Sending equip request: item ${inventoryId} to slot ${slotIndex}`);
+              socket.emit('player_equip_artifact', { inventoryId, slotIndex });
+              // Close any popups/prompts
+               const prompt = document.getElementById('equip-prompt');
+               if (prompt) prompt.remove();
+         }
+
+         function promptEquipItem(inventoryId, itemName) {
+              // Remove existing prompt first
+              let existingPrompt = document.getElementById('equip-prompt');
+              if(existingPrompt) existingPrompt.remove();
+
+              const promptDiv = document.createElement('div');
+              promptDiv.id = 'equip-prompt';
+              promptDiv.style.position = 'absolute';
+              promptDiv.style.top = '50%';
+              promptDiv.style.left = '50%';
+              promptDiv.style.transform = 'translate(-50%, -50%)';
+              promptDiv.style.background = 'rgba(0,0,0,0.8)';
+              promptDiv.style.border = '1px solid white';
+              promptDiv.style.padding = '20px';
+              promptDiv.style.zIndex = '100';
+              promptDiv.innerHTML = `Equip ${itemName} to which slot?<br>`;
+
+              for(let i=0; i<4; i++) {
+                  const btn = document.createElement('button');
+                  const currentItem = playerState.equipped[i] ? playerState.inventory[playerState.equipped[i]]?.name : 'Empty';
+                  btn.textContent = `Slot ${i+1} (${currentItem})`;
+                  btn.onclick = () => equipItem(inventoryId, i);
+                  promptDiv.appendChild(btn);
+              }
+              const cancelBtn = document.createElement('button');
+              cancelBtn.textContent = 'Cancel';
+              cancelBtn.onclick = () => promptDiv.remove();
+              promptDiv.appendChild(cancelBtn);
+
+              document.body.appendChild(promptDiv);
+          }
+
+
+        function setActiveArtifact(slotIndex) {
+             if (!socket || !playerId || slotIndex < 0 || slotIndex > 3) return;
+             logDebug(`Requesting set active artifact slot: ${slotIndex}`);
+              socket.emit('player_set_active_artifact', { slotIndex });
+         }
+
+        function performGachaWish() {
+            if (!socket || !playerId) return;
+             const now = Date.now();
+             if (now >= playerState.nextGachaTime) {
+                 logDebug("Sending gacha wish request");
+                 socket.emit('player_gacha_wish');
+             } else {
+                  const remaining = ((playerState.nextGachaTime - now) / 1000).toFixed(0);
+                  addLogMessage(`Gacha not ready. ${remaining}s remaining.`, chat);
+                  logDebug(`Gacha wish too early.`);
+             }
+        }
+
+        function toggleInventoryDisplay() {
+             // Basic toggle for inventory panel visibility - refine UI later
+             inventoryListDiv.style.display = inventoryListDiv.style.display === 'none' ? 'block' : 'none';
+         }
+
+
+        // --- Networking ---
+        let lastSentState = { time: 0, position: {x:0,y:0,z:0}, lookDirection: {x:0,y:0,z:1} };
+        const stateUpdateInterval = 100; // Send state ~10 times per second
+
+        function connectToServer() {
+            logDebug("Connecting to server...");
+             // Use window.location.origin for default connection
+             // Allow overriding via query parameter ?server=ws://custom.host:port
+             const urlParams = new URLSearchParams(window.location.search);
+             const serverUrl = urlParams.get('server') || window.location.origin;
+             logDebug(`Attempting connection to: ${serverUrl}`);
+
+            socket = io(serverUrl);
+
+            socket.on('connect', () => {
+                logDebug(`Connected to server with ID: ${socket.id}`);
+                // Connection successful, request version info
+                 socket.emit('request_version');
+            });
+
+             socket.on('version_info', (data) => {
+                 SERVER_VERSION = data.version;
+                 logDebug(`Received server version: ${SERVER_VERSION}`);
+                 if (CLIENT_VERSION !== SERVER_VERSION) {
+                     showVersionMismatch();
+                     socket.disconnect(); // Disconnect if version mismatch
+                 } else {
+                     // Version OK, can proceed with game init
+                     addLogMessage("Connected successfully!", chat);
+                 }
+             });
+
+            socket.on('init_state', (data) => {
+                 logDebug("Received init_state:", data);
+                 playerId = data.playerId;
+                 playerIdSpan.textContent = playerId.substring(0, 6); // Show shortened ID
+                 lastServerState = data.initialState;
+                 DEBUG_ENABLED = data.debug ?? false; // Update debug status
+                 if (DEBUG_ENABLED) {
+                     debugLog.style.display = 'block';
+                     addLogMessage("Debug mode enabled.", debugLog, true);
+                 }
+
+
+                 // Initialize local player representation
+                 if(data.initialState.players.find(p=>p.id === playerId)){
+                     const myInitialData = data.initialState.players.find(p=>p.id === playerId);
+                     if(!playerMesh) { // Only create if it doesn't exist
+                         const geometry = new THREE.CapsuleGeometry(0.5, 1.0, 4, 8);
+                         const material = new THREE.MeshStandardMaterial({ color: 0x00ff00, roughness: 0.7, metalness: 0.2 });
+                         playerMesh = new THREE.Mesh(geometry, material);
+                         playerMesh.castShadow = true;
+                         playerMesh.position.set(myInitialData.position.x, 1.0, myInitialData.position.z); // Start at correct y pos
+                         scene.add(playerMesh);
+                         entities[playerId] = { mesh: playerMesh, data: myInitialData, type: 'player' };
+                          createOrUpdateEntityLabel(playerId, myInitialData, 'player');
+                          logDebug("Created local player mesh.");
+                     } else {
+                          playerMesh.position.set(myInitialData.position.x, 1.0, myInitialData.position.z);
+                     }
+                      // Set initial look direction
+                     lookVector.x = Math.atan2(-myInitialData.lookDirection.x, -myInitialData.lookDirection.z); // Yaw
+                     lookVector.y = Math.asin(myInitialData.lookDirection.y); // Pitch - maybe? Or start level? Start level is safer.
+                     lookVector.y = 0; // Start looking level
+                      playerMesh.quaternion.setFromEuler(new THREE.Euler(lookVector.y, lookVector.x, 0, 'YXZ'));
+                 } else {
+                     console.error("CRITICAL: Player ID not found in initial player list!");
+                 }
+
+
+                 // Process initial game state
+                 updateGameState(data.initialState);
+
+                 // Update player specific data
+                 updatePlayerData(data.playerData);
+
+                 // Update known elements
+                 if (data.knownElements) {
+                     knownElementsClient = data.knownElements;
+                     logDebug("Received known elements:", knownElementsClient);
+                 }
+
+                 // Start animation loop AFTER receiving initial state
+                 animate();
+            });
+
+            socket.on('game_state', (data) => {
+                // logDebug('Received game_state:', data); // Can be very verbose
+                 lastServerState = data; // Store the latest full state
+                 updateGameState(data);
+            });
+
+            socket.on('player_joined', (data) => {
+                logDebug('Player joined:', data.id);
+                addLogMessage(`Player ${data.id.substring(0, 6)} joined.`, chat);
+                 if (data.id !== playerId && !entities[data.id]) {
+                     createOrUpdateEntityMesh({ ...data, name: `Player ${data.id.substring(0, 6)}`, isPlayer: true }); // Add name for label
+                 }
+            });
+
+            socket.on('player_left', (id) => {
+                 logDebug('Player left:', id);
+                 addLogMessage(`Player ${id.substring(0, 6)} left.`, chat);
+                 removeEntityMesh(id);
+            });
+
+            socket.on('mob_spawned', (data) => {
+                 logDebug(`Mob spawned: ${data.name} (${data.id})`);
+                 if (!entities[data.id]) {
+                      createOrUpdateEntityMesh({ ...data, isMob: true });
+                 }
+            });
+
+            socket.on('mob_removed', (id) => {
+                 logDebug(`Mob removed: ${id}`);
+                 removeEntityMesh(id);
+            });
+
+            socket.on('artifact_spawned', (data) => {
+                 logDebug(`Artifact spawned: ${data.name} (${data.id})`);
+                 if (!entities[data.id]) {
+                      createOrUpdateEntityMesh({ ...data, isArtifact: true });
+                 }
+            });
+
+            socket.on('artifact_removed', (id) => {
+                 logDebug(`Artifact removed: ${id}`);
+                 removeEntityMesh(id);
+            });
+
+             socket.on('dungeon_created', (data) => {
+                 logDebug(`Dungeon created: ${data.name} (${data.id})`);
+                  addLogMessage(`A new gate has opened: ${data.name}!`, chat);
+                  if (!entities[data.id]) {
+                       createOrUpdateEntityMesh({ ...data, isDungeon: true }); // Treat as an entity type 'dungeon'
+                  }
+             });
+
+             socket.on('dungeon_removed', (id) => {
+                  logDebug(`Dungeon removed: ${id}`);
+                  const dungeonName = entities[id]?.data?.name || 'A dungeon';
+                  addLogMessage(`${dungeonName} has closed.`, chat);
+                  removeEntityMesh(id);
+             });
+
+             socket.on('elements_updated', (data) => {
+                 logDebug('Known elements updated:', data);
+                  addLogMessage('New elemental forces have been discovered!', chat);
+                 knownElementsClient = data;
+                 // Could potentially update visuals of existing items/mobs if their element color changed, unlikely though.
+             });
+
+
+            socket.on('inventory_update', (data) => {
+                 logDebug('Received inventory update:', data);
+                 updatePlayerData(data); // Use the same handler
+            });
+
+            socket.on('player_respawn', (data) => {
+                logDebug('Player respawned');
+                addLogMessage("You have respawned!", chat);
+                if (playerMesh && data.position) {
+                    playerMesh.position.set(data.position.x, 1.0, data.position.z); // Reset position, ensure Y is correct
+                }
+                 if (data.health !== undefined) {
+                     playerState.health = data.health;
+                     playerState.maxHealth = data.stats?.maxHealth || playerState.maxHealth; // Update max health if sent
+                     updatePlayerUI();
+                 }
+                 // Maybe reset camera orientation? Or keep current look? Keep look for now.
+            });
+
+            socket.on('level_up', (data) => {
+                 logDebug('Level up!', data);
+                 addLogMessage(`LEVEL UP! You are now level ${data.level}!`, chat);
+                 if (data.stats) playerState.stats = data.stats;
+                 if (data.level) playerState.level = data.level;
+                  if (data.health !== undefined) playerState.health = data.health; // Full heal usually
+                 playerState.maxHealth = data.stats?.maxHealth || playerState.maxHealth;
+                 updatePlayerUI();
+                  // Add level up visual effect?
+            });
+
+            socket.on('xp_gain', (data) => {
+                 // logDebug('Gained XP:', data.xp); // Can be spammy
+                 if (data.xp !== undefined) playerState.xp = data.xp;
+                 // Level handled by level_up event
+                 updatePlayerUI();
+            });
+
+            socket.on('gacha_timer_update', (nextTime) => {
+                logDebug('Gacha timer updated:', new Date(nextTime).toLocaleTimeString());
+                playerState.nextGachaTime = nextTime;
+                updateGachaButton();
+            });
+
+             socket.on('show_message', (message) => {
+                  logDebug(`Server message: ${message}`);
+                  addLogMessage(message, chat);
+             });
+
+            socket.on('force_position', (position) => {
+                 logDebug("Server forced position update:", position);
+                 if(playerMesh && position) {
+                     playerMesh.position.set(position.x, position.y, position.z);
+                 }
+            });
+
+             socket.on('damage_taken', (data) => {
+                 logDebug(`Damage event: Target ${data.targetId} took ${data.damage} from ${data.attackerId}`);
+                 // Show damage numbers?
+                 if(entities[data.targetId]) {
+                     showDamageNumber(entities[data.targetId].mesh, data.damage, data.element);
+                 }
+                  // Health updates come via game_state or specific player updates normally
+             });
+
+             socket.on('player_attack', (data) => {
+                 // Trigger attack animation/effect for the player who attacked
+                 if(entities[data.playerId]) {
+                    logDebug(`Player attack visual for ${data.playerId}`);
+                    // Simple visual: flash the player mesh briefly?
+                     const mesh = entities[data.playerId].mesh;
+                     if(mesh && mesh.material) {
+                         const originalColor = mesh.material.emissive.getHex();
+                         mesh.material.emissive.setHex(0xffffff);
+                         setTimeout(() => { mesh.material.emissive.setHex(originalColor); }, 100);
+                     }
+                 }
+             });
+              socket.on('mob_attack', (data) => {
+                 // Trigger attack animation/effect for the mob who attacked
+                 if(entities[data.mobId]) {
+                     logDebug(`Mob attack visual for ${data.mobId}`);
+                      const mesh = entities[data.mobId].mesh;
+                      if(mesh && mesh.material) {
+                         const originalColor = mesh.material.emissive.getHex();
+                         mesh.material.emissive.setHex(0xffaa00); // Orange flash
+                         setTimeout(() => { mesh.material.emissive.setHex(originalColor); }, 100);
+                     }
+                 }
+             });
+
+
+            socket.on('disconnect', (reason) => {
+                 logDebug(`Disconnected from server: ${reason}`);
+                 addLogMessage(`Disconnected: ${reason}. Attempting to reconnect...`, chat);
+                 // Stop animation loop? Show disconnected message?
+                 // Socket.IO client might reconnect automatically depending on config/reason
+                 cleanupGameState(); // Clear entities etc.
+                 // Optionally trigger manual reconnect attempt after delay
+                 // setTimeout(connectToServer, 5000);
+            });
+
+            socket.on('connect_error', (err) => {
+                 logDebug(`Connection error: ${err.message}`);
+                 addLogMessage(`Connection Error: ${err.message}`, chat);
+                  cleanupGameState();
+            });
+        }
+
+        function sendPlayerState() {
+             if (!socket || !socket.connected || !playerId || !playerMesh) return;
+
+             const now = Date.now();
+             if (now - lastSentState.time < stateUpdateInterval) return; // Throttle updates
+
+              const currentPosition = playerMesh.position;
+              const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(playerMesh.quaternion);
+              const currentLookDirection = { x: forward.x, y: forward.y, z: forward.z }; // Use calculated forward vector
+
+              // Check if state has changed significantly enough to send
+              const posChanged = currentPosition.distanceToSquared(lastSentState.position) > 0.01;
+              // Compare look direction vectors (dot product close to 1 means little change)
+              const lookDot = forward.dot(new THREE.Vector3(lastSentState.lookDirection.x, lastSentState.lookDirection.y, lastSentState.lookDirection.z));
+              const lookChanged = lookDot < 0.999;
+
+
+              if (posChanged || lookChanged) {
+                    const stateToSend = {
+                        position: { x: currentPosition.x, y: currentPosition.y, z: currentPosition.z },
+                        lookDirection: currentLookDirection,
+                    };
+                    // logDebug("Sending player state:", stateToSend); // Verbose
+                    socket.emit('player_move', stateToSend);
+
+                    lastSentState = {
+                         time: now,
+                         position: currentPosition.clone(), // Store clone
+                         lookDirection: { ...currentLookDirection } // Store copy
+                    };
+              }
+        }
+
+         function updateGameState(state) {
+              if (!state) return;
+
+              const receivedPlayerIds = new Set(state.players?.map(p => p.id) || []);
+              const receivedMobIds = new Set(state.mobs?.map(m => m.id) || []);
+              const receivedArtifactIds = new Set(state.artifacts?.map(a => a.id) || []);
+              const receivedDungeonIds = new Set(state.dungeons?.map(d => d.id) || []);
+
+
+             // Update existing entities and create new ones
+             state.players?.forEach(p => {
+                  if (p.id === playerId) {
+                       // Update local player health/level if needed (usually comes via specific events)
+                       if (p.health !== undefined && p.maxHealth !== undefined) {
+                           if(p.health !== playerState.health || p.maxHealth !== playerState.maxHealth) {
+                               playerState.health = p.health;
+                               playerState.maxHealth = p.maxHealth;
+                               updatePlayerUI(); // Update UI if local player health changes
+                           }
+                       }
+                        if(p.level !== undefined && p.level !== playerState.level) {
+                            playerState.level = p.level;
+                             updatePlayerUI();
+                        }
+                       // Position/look is handled by client-side prediction + server correction/updates
+                       // Don't directly set playerMesh position from general game_state here
+                       // Just update the data cache in entities[playerId]
+                       if(entities[playerId]) entities[playerId].data = p;
+                  } else {
+                       // Update other players
+                       createOrUpdateEntityMesh({ ...p, name: `Lvl ${p.level} Player ${p.id.substring(0, 6)}`, isPlayer: true });
+                  }
+             });
+             state.mobs?.forEach(m => createOrUpdateEntityMesh({ ...m, isMob: true }));
+             state.artifacts?.forEach(a => createOrUpdateEntityMesh({ ...a, isArtifact: true }));
+             state.dungeons?.forEach(d => createOrUpdateEntityMesh({ ...d, isDungeon: true }));
+
+             // Remove entities that are no longer in the state
+             Object.keys(entities).forEach(id => {
+                  const type = entities[id].type;
+                  let exists = false;
+                   if(type === 'player') exists = receivedPlayerIds.has(id);
+                   else if(type === 'mob') exists = receivedMobIds.has(id);
+                   else if(type === 'artifact') exists = receivedArtifactIds.has(id);
+                   else if(type === 'dungeon') exists = receivedDungeonIds.has(id);
+
+                  if (!exists && id !== playerId) { // Don't remove local player mesh based on state absence
+                      removeEntityMesh(id);
+                  }
+             });
+
+              // Update Gacha Timer display based on playerState which might be updated elsewhere
+              updateGachaButton();
+         }
+
+         function updatePlayerData(data) {
+              if (data.inventory !== undefined) playerState.inventory = data.inventory;
+              if (data.equipped !== undefined) playerState.equipped = data.equipped;
+              if (data.activeSlot !== undefined) playerState.activeSlot = data.activeSlot;
+              if (data.stats !== undefined) playerState.stats = data.stats;
+              if (data.xp !== undefined) playerState.xp = data.xp;
+              if (data.level !== undefined) playerState.level = data.level;
+              if (data.nextGachaTime !== undefined) playerState.nextGachaTime = data.nextGachaTime;
+               if (data.health !== undefined) playerState.health = data.health;
+               if (data.stats?.maxHealth !== undefined) playerState.maxHealth = data.stats.maxHealth; // Update max health from stats
+
+
+              updatePlayerUI();
+              updateInventoryUI();
+              updateEquippedUI();
+               updateGachaButton(); // Ensure button updates if timer changes
+         }
+
+         function cleanupGameState() {
+              logDebug("Cleaning up game state.");
+              Object.keys(entities).forEach(id => removeEntityMesh(id));
+              entities = {};
+              gameScene = { players: {}, mobs: {}, artifacts: {}, dungeons: {} };
+              playerMesh = null;
+              playerId = null;
+              lastServerState = null;
+               // Clear UI fields
+               playerIdSpan.textContent = 'N/A';
+               playerLevelSpan.textContent = '1';
+               playerXpSpan.textContent = '0';
+               playerHealthSpan.textContent = '100';
+               playerMaxHealthSpan.textContent = '100';
+               playerHealthBar.value = 100;
+               playerHealthBar.max = 100;
+               equippedArtifactsDiv.innerHTML = `
+                   <div id="slot-0" class="artifact-slot" data-slot="0">Slot 1: Empty</div>
+                   <div id="slot-1" class="artifact-slot" data-slot="1">Slot 2: Empty</div>
+                   <div id="slot-2" class="artifact-slot" data-slot="2">Slot 3: Empty</div>
+                   <div id="slot-3" class="artifact-slot" data-slot="3">Slot 4: Empty</div>
+               `;
+               inventoryListDiv.innerHTML = '';
+         }
+
+        // --- UI Updates ---
+        function updatePlayerUI() {
+            if (!playerId) return;
+            playerLevelSpan.textContent = playerState.level;
+            playerXpSpan.textContent = playerState.xp;
+            playerHealthSpan.textContent = playerState.health.toFixed(0);
+            playerMaxHealthSpan.textContent = playerState.maxHealth.toFixed(0);
+            playerHealthBar.value = playerState.health;
+            playerHealthBar.max = playerState.maxHealth;
+        }
+
+        function updateEquippedUI() {
+            if (!playerId) return;
+            for (let i = 0; i < 4; i++) {
+                const slotDiv = document.getElementById(`slot-${i}`);
+                const inventoryId = playerState.equipped[i];
+                if (inventoryId && playerState.inventory[inventoryId]) {
+                    const item = playerState.inventory[inventoryId];
+                     const elementInfo = knownElementsClient[item.element] || { name: item.element, color: '#ffffff' };
+                    slotDiv.innerHTML = `Slot ${i+1}: ${item.name} [<span style="color: ${elementInfo.color}; text-shadow: 0 0 2px black;">${elementInfo.name}</span>]`;
+                    slotDiv.classList.add('equipped');
+                     slotDiv.style.borderColor = elementInfo.color || '#555'; // Color border by element
+                } else {
+                    slotDiv.innerHTML = `Slot ${i+1}: Empty`;
+                    slotDiv.classList.remove('equipped');
+                     slotDiv.style.borderColor = '#555';
+                }
+                // Highlight active slot
+                if (i === playerState.activeSlot && inventoryId) { // Only active if item is equipped
+                    slotDiv.classList.add('active');
+                     slotDiv.style.borderWidth = '2px';
+                } else {
+                    slotDiv.classList.remove('active');
+                     slotDiv.style.borderWidth = '1px';
+                }
+            }
+        }
+
+        function updateInventoryUI() {
+            if (!playerId) return;
+            inventoryListDiv.innerHTML = ''; // Clear previous list
+             if (Object.keys(playerState.inventory).length === 0) {
+                 inventoryListDiv.innerHTML = 'Inventory empty.';
+                 return;
+             }
+            Object.values(playerState.inventory).forEach(item => {
+                const itemDiv = document.createElement('div');
+                itemDiv.classList.add('inventory-item');
+                 itemDiv.style.borderLeft = `3px solid ${knownElementsClient[item.element]?.color || '#ccc'}`;
+                 itemDiv.style.paddingLeft = '5px';
+                 itemDiv.style.marginBottom = '2px';
+                 itemDiv.style.cursor = 'pointer';
+                itemDiv.textContent = `${item.name} (${item.element})`;
+                 itemDiv.dataset.inventoryId = item.id; // Store ID for equip action
+                 itemDiv.dataset.itemName = item.name;
+                inventoryListDiv.appendChild(itemDiv);
+            });
+        }
+
+        let gachaInterval = null;
+        function updateGachaButton() {
+            if (!gachaButton) return;
+            clearInterval(gachaInterval); // Clear previous interval
+
+            const update = () => {
+                const now = Date.now();
+                if (now >= playerState.nextGachaTime) {
+                    gachaButton.textContent = `Wish (Ready!)`;
+                    gachaButton.disabled = false;
+                    clearInterval(gachaInterval); // Stop interval when ready
+                } else {
+                    const remaining = ((playerState.nextGachaTime - now) / 1000).toFixed(0);
+                    gachaButton.textContent = `Wish (${remaining}s)`;
+                    gachaButton.disabled = true;
+                }
+            };
+            update(); // Initial update
+            gachaInterval = setInterval(update, 1000); // Update every second
+        }
+
+         function showDamageNumber(targetMesh, damage, element = 'physical') {
+             if (!targetMesh || !renderer) return;
+
+             const numberDiv = document.createElement('div');
+             numberDiv.textContent = Math.round(damage);
+             numberDiv.style.position = 'absolute';
+             numberDiv.style.color = knownElementsClient[element]?.color ? new THREE.Color(knownElementsClient[element].color).getStyle() : 'white'; // Use element color
+             numberDiv.style.fontSize = '14px';
+              numberDiv.style.fontWeight = 'bold';
+             numberDiv.style.textShadow = '1px 1px 2px black';
+             numberDiv.style.pointerEvents = 'none';
+             numberDiv.style.transition = 'transform 0.5s ease-out, opacity 0.5s ease-out';
+             numberDiv.style.transform = 'translate(-50%, -50%)'; // Initial position centering
+              numberDiv.style.opacity = '1';
+
+             labelsContainer.appendChild(numberDiv); // Add to labels container
+
+              // Initial position calculation (similar to labels)
+              const position = new THREE.Vector3();
+              const meshHeight = targetMesh.geometry.boundingBox ? targetMesh.geometry.boundingBox.max.y : (targetMesh.geometry.parameters.height || 1.0);
+              position.setFromMatrixPosition(targetMesh.matrixWorld);
+              position.y += meshHeight * targetMesh.scale.y * 0.5 + (Math.random() * 0.5 + 0.5); // Start above mesh, slightly random height
+              position.x += (Math.random() - 0.5) * 0.5; // Slight horizontal jitter
+
+              const updatePosition = () => {
+                  const vector = position.clone().project(camera);
+                  const x = (vector.x * 0.5 + 0.5) * renderer.domElement.clientWidth;
+                  const y = (vector.y * -0.5 + 0.5) * renderer.domElement.clientHeight;
+
+                   if (vector.z > 1) { // Hide if behind camera
+                       numberDiv.style.display = 'none';
+                   } else {
+                       numberDiv.style.display = 'block';
+                       numberDiv.style.left = `${x}px`;
+                       numberDiv.style.top = `${y}px`;
+                   }
+              };
+
+              updatePosition(); // Set initial position
+
+              // Animate floating up and fading out
+              requestAnimationFrame(() => { // Apply transform/opacity changes in next frame for transition to work
+                    numberDiv.style.transform = `translate(-50%, -150%) scale(1.2)`; // Move up, slightly bigger
+                    numberDiv.style.opacity = '0';
+              });
+
+
+             // Remove element after animation
+             setTimeout(() => {
+                 numberDiv.remove();
+             }, 500); // Matches transition duration
+         }
+
+        // --- Initialization ---
+        async function init() {
+            addLogMessage("Checking client version...", chat);
+            const versionOk = await checkVersion();
+            if (versionOk) {
+                 addLogMessage("Version OK. Initializing...", chat);
+                 initThree(); // Setup graphics first
+                 setupControls(); // Then controls
+                 connectToServer(); // Then network
+            } else {
+                addLogMessage("Version mismatch or connection error. Cannot start.", chat);
+                // Version mismatch message is already shown by checkVersion()
+            }
+        }
+
+        init(); // Start the client application
+
+    </script>
+</body>
+</html>
