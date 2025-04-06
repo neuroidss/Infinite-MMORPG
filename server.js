@@ -13,7 +13,7 @@ import fetch from 'node-fetch'; // For Ollama API calls
 const HOSTNAME = process.env.HOSTNAME || '0.0.0.0';
 const PORT = process.env.PORT || 3000;
 const DEBUG = process.env.DEBUG === 'true' || true; // Enable debug mode by default for easy testing
-const DESIRED_BOTS = 1;
+const DESIRED_BOTS = 10;
 const HEALTH_AND_ATTACK_MULTIPLIER = 1;
 const BOT_SPEED_MULTIPLIER = 4;
 const TICK_RATE = 30; // Game loop updates per second
@@ -309,7 +309,7 @@ const tools = [
 ];
 
 // Helper function for consistent ID generation from names
-const generateIdFromName = (name) => name.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim().replace(/\s+/g, '_');
+const generateIdFromName = (name) => name.toLowerCase().replace(/[^a-z0-9_\s]/g, '').trim().replace(/\s+/g, '_');
 
 // --- Tool Call Handlers ---
 const toolHandlers = {
@@ -321,6 +321,8 @@ const toolHandlers = {
             return `Artifact template ${id} already exists.`;
         }
          if (!knownElements[args.element.toLowerCase()]) {
+             log(`Cannot create artifact: Unknown element ${args.element} for artifact ${args.name}. Ensure elements are created first.`);
+             return `Cannot create artifact: Unknown element ${args.element} for artifact ${args.name}. Ensure elements are created first.`;
             log(`Warning: Unknown element ${args.element} for artifact ${args.name}. Using physical.`);
             args.element = 'physical'; // Default to physical if element unknown
         }
@@ -348,13 +350,26 @@ const toolHandlers = {
             return `Mob template ${id} already exists.`;
         }
          if (!knownElements[args.element.toLowerCase()]) {
+             log(`Cannot create mob: Unknown element ${args.element} for mob ${args.name}. Ensure elements are created first.`);
+             return `Cannot create mob: Unknown element ${args.element} for mob ${args.name}. Ensure elements are created first.`;
             log(`Warning: Unknown element ${args.element} for mob ${args.name}. Using physical.`);
             args.element = 'physical';
         }
         // Validate loot table references existing artifact templates
         // Use sanitized IDs for lookup here too
         const validLoot = (args.loot_table || []).filter(aName => knownArtifactTemplates[generateIdFromName(aName)]);
+        let invalidLoot = [];
+        for(const aName of args.loot_table)
+        {
+          const sanitizedID = generateIdFromName(aName);
+          if (!knownArtifactTemplates[sanitizedID]) 
+          {
+            invalidLoot.push({"name":aName,"id":sanitizedID});
+          }
+        }
         if (validLoot.length < (args.loot_table?.length || 0)) {
+             log(`Cannot create mob: Some loot table items ${JSON.stringify(invalidLoot)} for mob ${args.name} do not exist yet. Ensure artifacts are created first.`);
+             return `Cannot create mob: Some loot table items ${JSON.stringify(invalidLoot)} for mob ${args.name} do not exist yet. Ensure artifacts are created first.`;
             log(`Warning: Some loot table items for mob ${args.name} do not exist yet.`);
         }
 
@@ -433,9 +448,9 @@ const toolHandlers = {
         const averageLevel = playerCount > 0
             ? Object.values(players).reduce((sum, p) => sum + p.level, 0) / playerCount
             : 0;
-        const activeDungeons = Object.keys(dungeons).length;
-        const knownArtifactCount = Object.keys(knownArtifactTemplates).length;
-        const knownMobCount = Object.keys(knownMobTemplates).length;
+        const activeDungeons = JSON.stringify(Object.keys(dungeons));//.length;
+        const knownArtifactCount = JSON.stringify(Object.keys(knownArtifactTemplates));//.length;
+        const knownMobCount = JSON.stringify(Object.keys(knownMobTemplates));//.length;
 
         const worldStateSummary = `
         Current World State:
@@ -460,7 +475,9 @@ const toolHandlers = {
         if (knownElements[elementId]) {
             return `Element ${args.name} already exists.`;
         }
-        if (!args.color_hex || !/^0x[0-9A-Fa-f]{6}$/.test(args.color_hex)) {
+        if (!(args.color_hex || /^0x[0-9A-Fa-f]{6}$/.test(args.color_hex) || /^#[0-9A-Fa-f]{6}$/.test(args.color_hex))) {
+             log(`Cannot create element: Invalid color hex ${args.color_hex} for element ${args.name}. use 0x or # format.`);
+             return `Cannot create element: Invalid color hex ${args.color_hex} for element ${args.name}. use 0x or # format.`;
             log(`Invalid color hex ${args.color_hex} for element ${args.name}. Using default grey.`);
             args.color_hex = '0xaaaaaa';
         }
@@ -512,14 +529,28 @@ const toolHandlers = {
 // --- Chatbot Interaction Logic ---
 const triggerChatbotSenseAndAct = async () => {
     if (chatbotState.isBusy) return;
-
+ let failed_to_create_dungeon = true;
+ let failed_to_create_dungeon_text = "";
+ let failed_to_create_text = "";
+ while(failed_to_create_dungeon) 
+ {
     log("Triggering chatbot sense and act cycle...");
     const senseResult = toolHandlers.sense_world({}); // Get current world state summary
 
     const messages = [
-        { role: "system", content: "You are an AI game master for an MMORPG. Your goal is to keep the game interesting and challenging by dynamically creating content like artifacts, mobs, dungeons, and even new elements. Use the provided tools to modify the game world. Analyze the world state provided by the 'sense_world' tool response and decide on ONE action (or none if the world seems balanced). Prioritize creating dungeons if players seem bored or have cleared existing ones. Invent new things when variety is low." },
+        { role: "system", content: "You are an AI game master for an MMORPG. Your goal is to keep the game interesting and challenging by dynamically creating content like artifacts, mobs, dungeons, and even new elements. Use the provided tools to modify the game world. Analyze the world state provided by the 'sense_world' tool response and decide on ONE action (or none if the world seems balanced). Prioritize creating dungeons if players seem bored or have cleared existing ones. Invent new things when variety is low. when creating something be sure that all elements exists, so first create needed elements." },
         { role: "assistant", content: senseResult } // Provide the world state as if the assistant called sense_world
     ];
+  if (failed_to_create_dungeon)
+  {
+    log("failed_to_create_dungeon...");
+        if (failed_to_create_dungeon_text) {
+          messages.push({ role: "user", content: failed_to_create_dungeon_text })
+        }
+        if (failed_to_create_text) {
+          messages.push({ role: "user", content: failed_to_create_text })
+        }
+  }
 
     const toolCalls = await callOllamaAPI(messages, tools);
 
@@ -532,7 +563,23 @@ const triggerChatbotSenseAndAct = async () => {
                 const handlerResult = toolHandlers[call.function.name](args);
                 log(`Tool call '${call.function.name}' executed. Result: ${handlerResult}`);
                  if (call.function.name === 'create_dungeon') {
+  if (handlerResult.includes("Cannot create")) 
+  {
+    failed_to_create_dungeon_text = "previous your attempt to create dungeon was:\n "+ JSON.stringify(args) + "\n with result: \n" + handlerResult + "\n please call other tools to finish creation of dungeon";
+                log(failed_to_create_dungeon_text);
+    failed_to_create_dungeon = true;
+  } else {
+    failed_to_create_dungeon = false;
+  }
                     chatbotState.lastDungeonCreation = Date.now(); // Track when a dungeon was made
+                 } else {
+  if (handlerResult.includes("Cannot create")) 
+  {
+    failed_to_create_text = "addidtionally your creation attempt was:\n "+ JSON.stringify(args) + "\n with result: \n" + handlerResult + "\n please call other tools to finish creation";
+                log(failed_to_create_text);
+  } else {
+    failed_to_create_text = "";
+  }
                  }
                  // We could potentially send the result back to Ollama for a follow-up, but let's keep it simple.
             } catch (e) {
@@ -545,6 +592,7 @@ const triggerChatbotSenseAndAct = async () => {
     } else {
         log("Chatbot decided not to take action or failed to call a tool.");
     }
+ }
      chatbotState.lastSenseTime = Date.now();
 };
 
@@ -1792,7 +1840,7 @@ const playerBotAI = (botId) => {
               });
 
                // Check players (non-bot)
-               Object.values(players).forEach(player => {
+               if(!nearestTarget) Object.values(players).forEach(player => {
                   if (player.health > 0 && player.id !== botId) { // Don't target self //  && !player.isBot or other bots
                        const dist = calculateDistance(bot.position, player.position);
                        if (dist < minDist) {
