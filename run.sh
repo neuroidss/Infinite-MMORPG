@@ -13,7 +13,7 @@ export DEBUG=${DEBUG:-true}
 # Set Ollama API URL (OpenAI compatible endpoint)
 export OLLAMA_API_URL=${OLLAMA_API_URL:-"http://10.8.0.14:11434/v1/chat/completions"}
 # Set Ollama model to use (ensure it's running and supports function calling)
-export OLLAMA_MODEL=${OLLAMA_MODEL:-"qwen2:7b-instruct"} # or another suitable model
+export OLLAMA_MODEL=${OLLAMA_MODEL:-"qwen2.5-coder:7b-instruct-q8_0"} # or another suitable model
 
 # --- Dependencies Check ---
 echo "Checking for Node.js and npm..."
