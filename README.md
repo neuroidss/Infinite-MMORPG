@@ -1,7 +1,5 @@
 # Infinite-MMORPG
 
-http://neuroidss.com:8000/
-
 ![llm inifinitely creates mmorpg](https://github.com/neuroidss/Infinite-MMORPG/blob/main/Screencast_from_2025-04-06_19-41-47.gif?raw=true)
 
 ```
